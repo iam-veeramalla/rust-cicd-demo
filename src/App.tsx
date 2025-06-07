@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { CheckCircle2, Circle, Plus, Trash2 } from 'lucide-react';
 
 interface Task {
@@ -11,29 +11,43 @@ function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [newTask, setNewTask] = useState('');
 
+  const fetchTasks = () => {
+    fetch('/api/tasks')
+      .then((r) => r.json())
+      .then(setTasks)
+      .catch(() => setTasks([]));
+  };
+
+  useEffect(() => {
+    fetchTasks();
+  }, []);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTask.trim()) return;
 
-    setTasks([
-      ...tasks,
-      {
-        title: newTask,
-        completed: false,
-        created_at: new Date().toISOString(),
-      },
-    ]);
-    setNewTask('');
+    fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: newTask }),
+    })
+      .then(() => {
+        setNewTask('');
+        fetchTasks();
+      })
+      .catch(() => {});
   };
 
   const toggleTask = (index: number) => {
-    const newTasks = [...tasks];
-    newTasks[index].completed = !newTasks[index].completed;
-    setTasks(newTasks);
+    fetch(`/api/tasks/${index}/complete`, { method: 'POST' })
+      .then(fetchTasks)
+      .catch(() => {});
   };
 
   const deleteTask = (index: number) => {
-    setTasks(tasks.filter((_, i) => i !== index));
+    fetch(`/api/tasks/${index}`, { method: 'DELETE' })
+      .then(fetchTasks)
+      .catch(() => {});
   };
 
   return (
