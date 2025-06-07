@@ -51,9 +51,21 @@ The application supports the following commands:
 # Mark a task as completed (where 1 is the task number)
 ./target/release/rust-todo complete 1
 
+
 # Delete a task (where 1 is the task number)
 ./target/release/rust-todo delete 1
 ```
+
+### Starting the Web Interface
+
+To run the simple Node.js server that serves the React frontend and provides a
+REST API, execute:
+
+```bash
+node server.js
+```
+
+The application will be available at `http://localhost:3000`.
 
 ### Running Tests
 
