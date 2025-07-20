@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI Security Scan Pipeline
 
 on:
   push:
@@ -6,237 +6,42 @@ on:
   pull_request:
     branches: [ main ]
 
-env:
-  DOCKER_REGISTRY: ghcr.io
-  DOCKER_IMAGE: ${{ github.repository_owner }}/rust-todo
-  HELM_VALUES_FILE: helm/rust-todo/values.yaml
-
 jobs:
-  # 1. Static Code Analysis
-  lint:
-    name: Static Code Analysis
+  security-scan:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-      
-      - name: Check formatting
-        run: cargo fmt --check
-      
-      - name: Run Clippy
-        run: cargo clippy -- -D warnings
 
-  # 2. Build
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    needs: lint
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-      
-      - name: Build
-        run: cargo build --release
-      
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-todo-binary
-          path: target/release/rust-todo
-          retention-days: 1
+    - name: Checkout Code
+      uses: actions/checkout@v3
 
-  # 3. Unit Tests
-  test:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    needs: lint
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-      
-      - name: Run tests
-        run: cargo test
+    - name: Run Snyk to check for vulnerabilities
+      uses: snyk/actions/node@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        command: test --json-file-output=snyk_report.json
 
-  # 4. Docker Image Creation
-  docker-build:
-    name: Docker Image Creation
-    runs-on: ubuntu-latest
-    needs: [build, test]
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      
-      - name: Generate Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}
-          tags: |
-            type=sha,format=short
-            type=ref,event=branch
-            type=ref,event=pr
-            latest
-      
-      - name: Login to GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.DOCKER_REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          load: true
-      
-      - name: Save Docker image for scanning
-        run: |
-          docker save ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}:$(echo "${{ steps.meta.outputs.tags }}" | head -n 1 | cut -d ":" -f 2) > image.tar
-      
-      - name: Upload Docker image
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-image
-          path: image.tar
-          retention-days: 1
+    - name: Start Rapid7 Scan
+      run: |
+        curl -X POST https://us.api.insight.rapid7.com/ias/v1/scans \
+          -H "X-Api-Key: ${{ secrets.RAPID7_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+                "app": "${{ secrets.RAPID7_APP_ID }}",
+                "scanConfig": "${{ secrets.RAPID7_SCAN_CONFIG_ID }}",
+                "name": "GitHub CI Scan"
+              }'
 
-  # 5. Docker Image Scan
-  docker-scan:
-    name: Docker Image Scan
-    runs-on: ubuntu-latest
-    needs: docker-build
-    steps:
-      - name: Download Docker image
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-      
-      - name: Load Docker image
-        run: |
-          docker load < image.tar
-      
-      - name: Scan Docker image with Trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}:$(docker images --format "{{.Tag}}" | head -n 1)
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
-
-  # 6. Docker Image Push
-  docker-push:
-    name: Docker Image Push
-    runs-on: ubuntu-latest
-    needs: docker-scan
-    if: github.event_name != 'pull_request'
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Download Docker image
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image
-      
-      - name: Load Docker image
-        run: |
-          docker load < image.tar
-      
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.DOCKER_REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      
-      - name: Generate Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}
-          tags: |
-            type=sha,format=short
-            type=ref,event=branch
-            latest
-      
-      - name: Push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-      
-      - name: Get Docker image tag
-        id: image_tag
-        run: |
-          echo "IMAGE_TAG=$(echo '${{ steps.meta.outputs.tags }}' | head -n 1 | cut -d ':' -f 2)" >> $GITHUB_ENV
-
-  # 7. Update Helm values.yaml
-  update-helm:
-    name: Update Helm values.yaml
-    runs-on: ubuntu-latest
-    needs: docker-push
-    if: github.event_name != 'pull_request'
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Generate Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}
-          tags: |
-            type=sha,format=short
-      
-      - name: Extract tag
-        id: extract_tag
-        run: |
-          TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1 | cut -d ":" -f 2)
-          echo "TAG=$TAG" >> $GITHUB_ENV
-      
-      - name: Update Helm values
-        run: |
-          sed -i "s|tag:.*|tag: \"${{ env.TAG }}\"|g" ${{ env.HELM_VALUES_FILE }}
-      
-      - name: Commit changes
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "ci: update image tag to ${{ env.TAG }}"
-          file_pattern: ${{ env.HELM_VALUES_FILE }}
+    - name: Send Email Report
+      uses: akhil0333/action-send-mail@v3
+      with:
+        server_address: smtp.gmail.com
+        server_port: 587
+        username: ${{ secrets.EMAIL_USER }}
+        password: ${{ secrets.EMAIL_PASS }}
+        subject: Security Scan Report - GitHub Actions
+        to: ${{ secrets.EMAIL_TO }}
+        from: GitHub CI Pipeline
+        body: |
+          Security Scan Results attached.
+        attachments: snyk_report.json
