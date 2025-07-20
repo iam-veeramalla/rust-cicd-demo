@@ -1,4 +1,4 @@
-name: CI Security Scan Pipeline
+name: CI Security Scan Pipeline 
 
 on:
   push:
